@@ -1,7 +1,9 @@
 # 房贷计算器 - Vue 版本
 
 一个功能完整的房贷计算器，支持等额本息、等额本金、提前还款、利率变更等功能。
-image.png
+
+![示例截图](https://github.com/liuxiaoqigui/loan/raw/main/Jietu20260130-135720.png)
+
 ## 功能特性
 
 - ✅ 等额本息 / 等额本金两种还款方式
