@@ -62,6 +62,19 @@
           <span>当前剩余本金：</span>
           <span class="amount">{{ formatCurrency(currentRemainingPrincipal) }}</span>
         </div>
+        <div class="summary-item">
+          <span>已还款进度：</span>
+          <span>{{ calculateProgress() }}%</span>
+        </div>
+        <div class="progress-bar-container">
+          <div class="progress-bar">
+            <div class="progress-fill" :style="{ width: calculateProgress() + '%' }"></div>
+          </div>
+        </div>
+        <div class="summary-item">
+          <span>预估LTV（贷款价值比）：</span>
+          <span class="ltv-value" :class="getLTVClass()">{{ calculateLTV() }}%</span>
+        </div>
       </div>
 
       <div class="chart-section">
@@ -228,6 +241,39 @@ const currentRemainingPrincipal = computed(() => {
   return parseFloat(loanAmount.value) || 0
 })
 
+// 计算还款进度
+const calculateProgress = () => {
+  if (!loanAmount.value || payments.value.length === 0) {
+    return 0
+  }
+
+  const total = parseFloat(loanAmount.value)
+  const paid = total - currentRemainingPrincipal.value
+
+  return Math.min(100, Math.round((paid / total) * 100))
+}
+
+// 计算LTV（贷款价值比）
+const calculateLTV = (propertyValue = loanAmount.value * 1.2) => {
+  if (!propertyValue || propertyValue <= 0) {
+    return 0
+  }
+
+  return Math.round((parseFloat(loanAmount.value) / propertyValue) * 100)
+}
+
+// 计算LTV的样式类
+const getLTVClass = () => {
+  const ltv = calculateLTV()
+  if (ltv <= 60) {
+    return 'low'
+  } else if (ltv <= 80) {
+    return 'medium'
+  } else {
+    return 'high'
+  }
+}
+
 // 格式化货币
 const formatCurrency = (amount) => {
   return '¥' + Number(amount).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
@@ -256,10 +302,15 @@ const calculateEqualPayment = (loanAmount, annualRate, years, firstPaymentDate) 
   let remainingPrincipal = loanAmount
 
   const paymentsArr = []
-  const paymentDate = new Date(firstPaymentDate)
+  let paymentDate = new Date(firstPaymentDate)
 
   for (let i = 1; i <= totalMonths; i++) {
-    paymentDate.setMonth(paymentDate.getMonth() + 1)
+    // 计算下个月的还款日期，处理月份天数不同的情况
+    const nextMonth = new Date(paymentDate.getFullYear(), paymentDate.getMonth() + 1, paymentDate.getDate())
+    if (nextMonth.getDate() !== paymentDate.getDate()) {
+      nextMonth.setDate(0) // 如果下个月没有对应日期，取该月最后一天
+    }
+    paymentDate = nextMonth
 
     const interest = remainingPrincipal * monthlyRate
     const principal = monthlyPayment - interest
@@ -294,10 +345,15 @@ const calculateEqualPrincipal = (loanAmount, annualRate, years, firstPaymentDate
   const monthlyPrincipal = loanAmount / totalMonths
 
   const paymentsArr = []
-  const paymentDate = new Date(firstPaymentDate)
+  let paymentDate = new Date(firstPaymentDate)
 
   for (let i = 1; i <= totalMonths; i++) {
-    paymentDate.setMonth(paymentDate.getMonth() + 1)
+    // 计算下个月的还款日期，处理月份天数不同的情况
+    const nextMonth = new Date(paymentDate.getFullYear(), paymentDate.getMonth() + 1, paymentDate.getDate())
+    if (nextMonth.getDate() !== paymentDate.getDate()) {
+      nextMonth.setDate(0) // 如果下个月没有对应日期，取该月最后一天
+    }
+    paymentDate = nextMonth
 
     const interest = remainingPrincipal * monthlyRate
     const monthlyPayment = monthlyPrincipal + interest
@@ -351,12 +407,11 @@ const recalculateReducePayment = (paymentsArr, startIndex, remainingPrincipal, f
 // 减少期数重新计算
 const recalculateReduceTerm = (paymentsArr, startIndex, remainingPrincipal, firstPaymentDate, repaymentType) => {
   const monthlyRate = interestRate.value / 100 / 12
-  const monthlyPayment = paymentsArr[startIndex - 1]?.monthlyPayment || paymentsArr[0].monthlyPayment
 
   if (repaymentType === 'equal-payment') {
     // 等额本息：保持月供不变，计算剩余期数
-    const totalInterest = monthlyPayment * paymentsArr.length - interestRate.value / 100 / 12 * remainingPrincipal
-    const remainingMonths = Math.ceil(remainingPrincipal / (monthlyPayment - monthlyPayment / paymentsArr.length))
+    const monthlyPayment = paymentsArr[startIndex - 1]?.monthlyPayment || paymentsArr[0].monthlyPayment
+    const remainingMonths = Math.ceil(-Math.log(1 - monthlyRate * remainingPrincipal / monthlyPayment) / Math.log(1 + monthlyRate))
 
     for (let i = startIndex; i < paymentsArr.length; i++) {
       if (i - startIndex >= remainingMonths) {
@@ -373,22 +428,34 @@ const recalculateReduceTerm = (paymentsArr, startIndex, remainingPrincipal, firs
       paymentsArr[i].recalculated = true
     }
   } else {
-    // 等额本金：保持月供不变，计算剩余期数
+    // 等额本金：保持月供不变，但月供会递减
     const monthlyPrincipal = paymentsArr[0].principal
-    const remainingMonths = Math.ceil(remainingPrincipal / monthlyPrincipal)
+    let currentRemainingPrincipal = remainingPrincipal
 
     for (let i = startIndex; i < paymentsArr.length; i++) {
-      if (i - startIndex >= remainingMonths) {
+      if (currentRemainingPrincipal <= 0) {
         paymentsArr[i].removed = true
         continue
       }
-      const interest = remainingPrincipal * monthlyRate
+
+      const interest = currentRemainingPrincipal * monthlyRate
       const monthlyPayment = monthlyPrincipal + interest
-      remainingPrincipal -= monthlyPrincipal
-      paymentsArr[i].monthlyPayment = monthlyPayment
-      paymentsArr[i].principal = monthlyPrincipal
-      paymentsArr[i].interest = interest
-      paymentsArr[i].remainingPrincipal = Math.max(0, remainingPrincipal)
+      const principal = monthlyPrincipal
+
+      currentRemainingPrincipal -= principal
+
+      if (currentRemainingPrincipal < 0) {
+        // 最后一个月调整本金，确保不会出现负数
+        const adjustedPrincipal = remainingPrincipal - monthlyPrincipal * (i - startIndex)
+        paymentsArr[i].principal = adjustedPrincipal
+        paymentsArr[i].monthlyPayment = adjustedPrincipal + interest
+        paymentsArr[i].remainingPrincipal = 0
+      } else {
+        paymentsArr[i].monthlyPayment = monthlyPayment
+        paymentsArr[i].principal = principal
+        paymentsArr[i].interest = interest
+        paymentsArr[i].remainingPrincipal = Math.max(0, currentRemainingPrincipal)
+      }
       paymentsArr[i].recalculated = true
     }
   }
@@ -401,18 +468,27 @@ const applySingleEarlyPayment = (results, earlyPayment, firstPaymentDate) => {
   let paymentsArr = [...results.payments]
 
   const earlyPaymentDate = new Date(earlyPayment.date)
+  // 找到第一个大于等于提前还款日期的还款期
   const targetPeriodIndex = paymentsArr.findIndex(p => {
     const paymentDate = new Date(p.date)
     return paymentDate >= earlyPaymentDate
   })
   if (targetPeriodIndex === -1) return results
 
-  const remainingPrincipalBefore = paymentsArr[targetPeriodIndex].remainingPrincipal
+  // 计算提前还款时的剩余本金
+  let remainingPrincipalBefore = paymentsArr[targetPeriodIndex].remainingPrincipal
+  // 如果提前还款发生在某期还款日当天，需要考虑该期已经计算的本金部分
+  if (paymentsArr[targetPeriodIndex].date.toDateString() === earlyPaymentDate.toDateString()) {
+    remainingPrincipalBefore -= paymentsArr[targetPeriodIndex].principal
+  }
+
   const remainingPrincipalAfter = Math.max(0, remainingPrincipalBefore - earlyPayment.amount)
 
+  // 标记提前还款
   paymentsArr[targetPeriodIndex].earlyPayment = earlyPayment.amount
   paymentsArr[targetPeriodIndex].earlyPaymentType = earlyPayment.type
 
+  // 重新计算后续还款
   if (earlyPayment.type === 'reduce-payment') {
     paymentsArr = recalculateReducePayment(paymentsArr, targetPeriodIndex, remainingPrincipalAfter, firstPaymentDate, repaymentType.value)
   } else if (earlyPayment.type === 'reduce-term') {
@@ -465,50 +541,52 @@ const applySingleRateChange = (results, rateChange, firstPaymentDate) => {
   const monthlyRate = newRate / 100 / 12
   const remainingMonths = paymentsArr.length - changePeriodIndex
 
-  let monthlyPayment
   if (repaymentType.value === 'equal-payment') {
-    monthlyPayment = remainingPrincipal * monthlyRate * Math.pow(1 + monthlyRate, remainingMonths) /
+    // 等额本息：重新计算月供
+    const newMonthlyPayment = remainingPrincipal * monthlyRate * Math.pow(1 + monthlyRate, remainingMonths) /
       (Math.pow(1 + monthlyRate, remainingMonths) - 1)
-  } else {
-    const monthlyPrincipal = paymentsArr[0].principal
+
     for (let i = changePeriodIndex; i < paymentsArr.length; i++) {
       const interest = remainingPrincipal * monthlyRate
-      paymentsArr[i].monthlyPayment = monthlyPrincipal + interest
-      paymentsArr[i].principal = monthlyPrincipal
+      const principal = newMonthlyPayment - interest
+      remainingPrincipal -= principal
+      paymentsArr[i].monthlyPayment = newMonthlyPayment
+      paymentsArr[i].principal = principal
       paymentsArr[i].interest = interest
-      remainingPrincipal -= monthlyPrincipal
       paymentsArr[i].remainingPrincipal = Math.max(0, remainingPrincipal)
       paymentsArr[i].rateChanged = true
     }
+  } else {
+    // 等额本金：重新计算每期月供（月供递减）
+    const originalMonthlyPrincipal = loanAmount.value / (loanTerm.value * 12)
+    let currentRemainingPrincipal = remainingPrincipal
 
-    let totalPayment2 = 0
-    let totalInterest2 = 0
-    paymentsArr.forEach(p => {
-      if (!p.removed) {
-        totalPayment2 += p.monthlyPayment
-        if (p.earlyPayment) {
-          totalPayment2 += p.earlyPayment
-        }
-        totalInterest2 += p.interest
+    for (let i = changePeriodIndex; i < paymentsArr.length; i++) {
+      if (currentRemainingPrincipal <= 0) {
+        paymentsArr[i].removed = true
+        continue
       }
-    })
 
-    return {
-      payments: paymentsArr.filter(p => !p.removed),
-      totalPayment: totalPayment2,
-      totalInterest: totalInterest2
+      const interest = currentRemainingPrincipal * monthlyRate
+      const monthlyPayment = originalMonthlyPrincipal + interest
+      const principal = originalMonthlyPrincipal
+
+      currentRemainingPrincipal -= principal
+
+      if (currentRemainingPrincipal < 0) {
+        // 最后一个月调整本金
+        const adjustedPrincipal = remainingPrincipal - originalMonthlyPrincipal * (i - changePeriodIndex)
+        paymentsArr[i].principal = adjustedPrincipal
+        paymentsArr[i].monthlyPayment = adjustedPrincipal + interest
+        paymentsArr[i].remainingPrincipal = 0
+      } else {
+        paymentsArr[i].monthlyPayment = monthlyPayment
+        paymentsArr[i].principal = principal
+        paymentsArr[i].interest = interest
+        paymentsArr[i].remainingPrincipal = Math.max(0, currentRemainingPrincipal)
+      }
+      paymentsArr[i].rateChanged = true
     }
-  }
-
-  for (let i = changePeriodIndex; i < paymentsArr.length; i++) {
-    const interest = remainingPrincipal * monthlyRate
-    const principal = monthlyPayment - interest
-    remainingPrincipal -= principal
-    paymentsArr[i].monthlyPayment = monthlyPayment
-    paymentsArr[i].principal = principal
-    paymentsArr[i].interest = interest
-    paymentsArr[i].remainingPrincipal = Math.max(0, remainingPrincipal)
-    paymentsArr[i].rateChanged = true
   }
 
   let totalPayment2 = 0
@@ -575,16 +653,29 @@ const recalculateLoan = () => {
 
 // 计算贷款
 const calculateLoan = () => {
+  // 输入验证
   if (!loanAmount.value || loanAmount.value <= 0) {
     alert('请输入有效的房贷金额')
+    return
+  }
+  if (loanAmount.value > 10000000) {
+    alert('房贷金额不能超过1000万')
     return
   }
   if (!interestRate.value || interestRate.value <= 0) {
     alert('请输入有效的年利率')
     return
   }
+  if (interestRate.value > 20) {
+    alert('年利率不能超过20%')
+    return
+  }
   if (!loanTerm.value || loanTerm.value <= 0) {
     alert('请输入有效的贷款年限')
+    return
+  }
+  if (loanTerm.value > 50) {
+    alert('贷款年限不能超过50年')
     return
   }
   if (!firstPaymentDate.value) {
@@ -592,6 +683,18 @@ const calculateLoan = () => {
     return
   }
 
+  // 验证首次还款时间不能早于今天
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const firstPayment = new Date(firstPaymentDate.value)
+  firstPayment.setHours(0, 0, 0, 0)
+
+  if (firstPayment < today) {
+    alert('首次还款时间不能早于今天')
+    return
+  }
+
+  // 重置历史记录
   earlyPaymentsList.value = []
   rateChangesList.value = []
   nextId.value = 1
@@ -613,8 +716,30 @@ const applyRateChange = () => {
     alert('请输入有效的利率')
     return
   }
+  if (newInterestRate.value > 20) {
+    alert('年利率不能超过20%')
+    return
+  }
   if (!rateChangeDate.value) {
     alert('请选择生效日期')
+    return
+  }
+
+  // 验证利率变更日期必须在首次还款之后
+  const firstPayment = new Date(firstPaymentDate.value)
+  const changeDate = new Date(rateChangeDate.value)
+  changeDate.setHours(0, 0, 0, 0)
+
+  if (changeDate <= firstPayment) {
+    alert('利率变更日期必须在首次还款日期之后')
+    return
+  }
+
+  // 验证利率变更日期不能是过去的日期
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  if (changeDate < today) {
+    alert('利率变更日期不能是过去的日期')
     return
   }
 
@@ -667,8 +792,34 @@ const applyEarlyPayment = () => {
     alert('请输入有效的提前还款金额')
     return
   }
+
+  // 检查提前还款金额是否超过剩余本金
+  const maxEarlyPayment = currentRemainingPrincipal.value
+  if (earlyPaymentAmount.value > maxEarlyPayment) {
+    alert(`提前还款金额不能超过剩余本金 ¥${formatCurrency(maxEarlyPayment)}`)
+    return
+  }
+
   if (!earlyPaymentDate.value) {
     alert('请选择还款日期')
+    return
+  }
+
+  // 验证提前还款日期必须在首次还款之后
+  const firstPayment = new Date(firstPaymentDate.value)
+  const earlyPaymentDateObj = new Date(earlyPaymentDate.value)
+  earlyPaymentDateObj.setHours(0, 0, 0, 0)
+
+  if (earlyPaymentDateObj < firstPayment) {
+    alert('提前还款日期必须在首次还款日期之后')
+    return
+  }
+
+  // 验证提前还款日期不能是过去的日期
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  if (earlyPaymentDateObj < today) {
+    alert('提前还款日期不能是过去的日期')
     return
   }
 
